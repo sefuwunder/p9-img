@@ -16,6 +16,9 @@ on the host X server.
   access, and runs the container with the workspace mounted.
 - `acme-container` — desk integration: runs containerized acme
   against host-mounted 9P trees (see below).
+- `acme-theme-bigger.patch` — the acme Theme/Bigger/Smaller
+  patch, applied during the image build so container acme has
+  the same theme and font-step commands as the patched host build.
 - `.dockerignore` — keeps `.git` out of the build context.
 
 ## Quick start
@@ -48,9 +51,10 @@ ACME_BIN=/path/to/acme-container desk acme
 The desk script still starts the services and mounts the trees on
 the host; only acme runs in the container. Closing acme ends the
 container run and the desk trap unmounts as usual. `MOUNT_ROOT`
-(default `/n`) is respected for the bind paths. Note the container
-builds stock 9fans plan9port, so this acme does not carry the
-Theme/Bigger/Smaller patch; run podman rootless so the container
+(default `/n`) is respected for the bind paths. The container
+build applies the acme Theme/Bigger/Smaller patch, so container
+acme has the same `Theme`/`Bigger`/`Smaller` commands as the
+patched host build; run podman rootless so the container
 can read the user-owned FUSE mounts.
 
 ## Notes

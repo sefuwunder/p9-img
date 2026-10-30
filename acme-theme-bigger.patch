@@ -1,0 +1,768 @@
+diff --git a/src/cmd/acme/acme.c b/src/cmd/acme/acme.c
+index e922934..106e9b0 100644
+--- a/src/cmd/acme/acme.c
++++ b/src/cmd/acme/acme.c
+@@ -1053,6 +1053,11 @@ iconinit(void)
+ 		textcols[BORD] = allocimage(display, Rect(0,0,1,1), screen->chan, 1, DYellowgreen);
+ 		textcols[TEXT] = display->black;
+ 		textcols[HTEXT] = display->black;
++
++		/* Tag levels start as classic tags; a theme
++		 * derives them (see theme_apply). */
++		memmove(rowtagcols, tagcols, sizeof(rowtagcols));
++		memmove(coltagcols, tagcols, sizeof(coltagcols));
+ 	}
+ 
+ 	r = Rect(0, 0, Scrollwid, font->height+1);
+@@ -1085,6 +1090,308 @@ iconinit(void)
+ 	but3col = allocimage(display, r, screen->chan, 1, 0x006600FF);
+ }
+ 
++/*
++ * Themes: named foreground/background pairs, ported from wily.
++ * A theme sets tag and body colors alike (wily's single-pair
++ * model): BACK is the background, TEXT/HTEXT the foreground,
++ * HIGH a mix of the two for selections, BORD the foreground.
++ * Until a theme is chosen, acme keeps its classic colors
++ * (curtheme < 0); the dump records a theme only once chosen,
++ * so an untouched session round-trips to classic colors.
++ */
++
++typedef struct Theme Theme;
++struct Theme
++{
++	char	*name;
++	char	*fg;
++	char	*bg;
++};
++
++static Theme themes[] =
++{
++	/* default: black on white */
++	{ "default",		"#000000", "#ffffff" },
++	/* Tokyo Night (night variant) */
++	{ "tokyo",		"#c0caf5", "#1a1b26" },
++	/* Tokyo Night Day (light variant) */
++	{ "tokyo-light",	"#3760bf", "#e1e2e7" },
++	/* Catppuccin Mocha */
++	{ "catppuccin",		"#cdd6f4", "#1e1e2e" },
++	/* Catppuccin Latte (light variant) */
++	{ "catppuccin-light",	"#4c4f69", "#eff1f5" },
++	/* Solarized (dark): base0 on base03 */
++	{ "solarized",		"#839496", "#002b36" },
++	/* Solarized (light): base00 on base3 */
++	{ "solarized-light",	"#657b83", "#fdf6e3" },
++	/* Nord (dark): nord4 on nord0 */
++	{ "nord",		"#d8dee9", "#2e3440" },
++	/* Nord Light: nord0 on nord6. Nord ships no official
++	 * light variant; this is the community inversion, the
++	 * same pair other nord-light ports use.
++	 */
++	{ "nord-light",		"#2e3440", "#eceff4" },
++	/* Rosé Pine (main): text on base */
++	{ "rose-pine",		"#e0def4", "#191724" },
++	/* Rosé Pine Dawn (light): text on base */
++	{ "rose-pine-dawn",	"#575279", "#faf4ed" },
++};
++static int nthemes = sizeof(themes)/sizeof(themes[0]);
++static int curtheme = -1;
++
++char*
++themename(void)
++{
++	if(curtheme < 0)
++		return nil;
++	return themes[curtheme].name;
++}
++
++/* Find a theme by name, accepting a couple of obvious aliases. */
++static int
++theme_lookup(char *name)
++{
++	int i;
++
++	if(name == nil)
++		return -1;
++	for(i=0; i<nthemes; i++)
++		if(strcmp(name, themes[i].name) == 0)
++			return i;
++	/* aliases, same as wily */
++	if(strcmp(name, "tokyonight") == 0)
++		return 1;
++	if(strcmp(name, "tokyonight-day") == 0 || strcmp(name, "day") == 0)
++		return 2;
++	if(strcmp(name, "mocha") == 0 || strcmp(name, "catppuccin-mocha") == 0)
++		return 3;
++	if(strcmp(name, "latte") == 0 || strcmp(name, "catppuccin-latte") == 0)
++		return 4;
++	if(strcmp(name, "solarized-dark") == 0)
++		return 5;
++	if(strcmp(name, "nord-dark") == 0)
++		return 7;
++	if(strcmp(name, "rose-pine-main") == 0)
++		return 9;
++	if(strcmp(name, "rose-pine-light") == 0 || strcmp(name, "dawn") == 0)
++		return 10;
++	return -1;
++}
++
++/* "#rrggbb" to a 32-bit RGBA color; 0 on malformed input. */
++static ulong
++hexcolor(char *s)
++{
++	int i, v;
++	ulong c;
++
++	if(s == nil || s[0] != '#' || strlen(s) != 7)
++		return 0;
++	c = 0;
++	for(i=1; i<7; i++){
++		if('0' <= s[i] && s[i] <= '9')
++			v = s[i]-'0';
++		else if('a' <= s[i] && s[i] <= 'f')
++			v = s[i]-'a'+10;
++		else if('A' <= s[i] && s[i] <= 'F')
++			v = s[i]-'A'+10;
++		else
++			return 0;
++		c = (c<<4) | v;
++	}
++	return (c<<8) | 0xFF;
++}
++
++static Image*
++mkcolor(ulong c)
++{
++	return allocimage(display, Rect(0,0,1,1), screen->chan, 1, c);
++}
++
++static ulong
++blendcolor(ulong a, ulong b, int num, int den)
++{
++	int r, g, bl;
++
++	r = (int)(((a>>24)&0xFF)*(den-num) + ((b>>24)&0xFF)*num)/den;
++	g = (int)(((a>>16)&0xFF)*(den-num) + ((b>>16)&0xFF)*num)/den;
++	bl = (int)(((a>>8)&0xFF)*(den-num) + ((b>>8)&0xFF)*num)/den;
++	return ((ulong)r<<24) | ((ulong)g<<16) | ((ulong)bl<<8) | 0xFF;
++}
++
++/* One color level: BACK as given, text colors from fg, and the
++ * selection highlight as fg mixed over BACK (as classic does). */
++static int
++mklevel(Image **cols, ulong back, ulong fg)
++{
++	int i;
++
++	cols[BACK] = mkcolor(back);
++	cols[TEXT] = mkcolor(fg);
++	cols[HTEXT] = mkcolor(fg);
++	cols[HIGH] = allocimagemix(display, fg, back);
++	cols[BORD] = mkcolor(fg);
++	for(i=0; i<NCOL; i++)
++		if(cols[i] == nil){
++			for(i=0; i<NCOL; i++)
++				if(cols[i])
++					freeimage(cols[i]);
++			return -1;
++		}
++	return 0;
++}
++
++static void
++freelevel(Image **cols)
++{
++	int i;
++
++	for(i=0; i<NCOL; i++)
++		if(cols[i] != display->black && cols[i] != display->white)
++			freeimage(cols[i]);
++}
++
++/* Free old levels, each distinct image once. The tag levels
++ * alias the same images until the first theme (iconinit copies
++ * tagcols into them), so freeing each array blindly would
++ * double-free the classic colors. */
++static void
++freelevels(Image **a1, Image **a2, Image **a3, Image **a4)
++{
++	Image **arrs[4];
++	Image *freed[4*NCOL];
++	int nf = 0, i, j, k;
++
++	arrs[0] = a1;
++	arrs[1] = a2;
++	arrs[2] = a3;
++	arrs[3] = a4;
++	for(k=0; k<4; k++)
++		for(i=0; i<NCOL; i++){
++			Image *p = arrs[k][i];
++			if(p == nil || p == display->black || p == display->white)
++				continue;
++			for(j=0; j<nf; j++)
++				if(freed[j] == p)
++					break;
++			if(j < nf)
++				continue;
++			freed[nf++] = p;
++			freeimage(p);
++		}
++}
++
++static void
++repaint_text(Text *t, Image **cols)
++{
++	memmove(t->fr.cols, cols, sizeof(t->fr.cols));
++	/* fr.r is the text area; odx equal to the width skips
++	 * directory recolumnation, and org (scroll) is untouched */
++	textredraw(t, t->fr.r, t->fr.font, t->fr.b, Dx(t->all));
++}
++
++static void
++repaint_all(void)
++{
++	int i, j;
++	Column *c;
++	Window *w;
++
++	repaint_text(&row.tag, rowtagcols);
++	for(i=0; i<row.ncol; i++){
++		c = row.col[i];
++		repaint_text(&c->tag, coltagcols);
++		for(j=0; j<c->nw; j++){
++			w = c->w[j];
++			repaint_text(&w->tag, tagcols);
++			repaint_text(&w->body, textcols);
++			/* scrollbar caches its thumb; force a redraw */
++			w->body.lastsr = nullrect;
++			textscrdraw(&w->body);
++			windrawbutton(w);
++		}
++	}
++}
++
++int
++theme_apply(char *name)
++{
++	int idx, i;
++	ulong fg, bg;
++	ulong wback, cback, rback;
++	Image *newtag[NCOL], *newcoltag[NCOL], *newrowtag[NCOL], *newtext[NCOL];
++	Image *oldtag[NCOL], *oldcoltag[NCOL], *oldrowtag[NCOL], *oldtext[NCOL];
++
++	idx = theme_lookup(name);
++	if(idx < 0)
++		return -1;
++	fg = hexcolor(themes[idx].fg);
++	bg = hexcolor(themes[idx].bg);
++	if(fg == 0 || bg == 0)
++		return -1;
++	/* Tag levels lift from the body toward the text color:
++	 * window tags a little, column tags more, row tag most. */
++	wback = blendcolor(bg, fg, 1, 8);
++	cback = blendcolor(bg, fg, 1, 4);
++	rback = blendcolor(bg, fg, 1, 2);
++	/* allocate every new image before touching the old ones */
++	for(i=0; i<NCOL; i++){
++		newtag[i] = nil;
++		newcoltag[i] = nil;
++		newrowtag[i] = nil;
++		newtext[i] = nil;
++	}
++	if(mklevel(newtext, bg, fg) < 0)
++		return -1;
++	if(mklevel(newtag, wback, fg) < 0){
++		freelevel(newtext);
++		return -1;
++	}
++	if(mklevel(newcoltag, cback, fg) < 0){
++		freelevel(newtext);
++		freelevel(newtag);
++		return -1;
++	}
++	if(mklevel(newrowtag, rback, fg) < 0){
++		freelevel(newtext);
++		freelevel(newtag);
++		freelevel(newcoltag);
++		return -1;
++	}
++	/* commit: globals, then buttons, then repaint, then free old */
++	memmove(oldtag, tagcols, sizeof(oldtag));
++	memmove(oldcoltag, coltagcols, sizeof(oldcoltag));
++	memmove(oldrowtag, rowtagcols, sizeof(oldrowtag));
++	memmove(oldtext, textcols, sizeof(oldtext));
++	memmove(tagcols, newtag, sizeof(tagcols));
++	memmove(coltagcols, newcoltag, sizeof(coltagcols));
++	memmove(rowtagcols, newrowtag, sizeof(rowtagcols));
++	memmove(textcols, newtext, sizeof(textcols));
++	if(button){
++		freeimage(button);
++		freeimage(modbutton);
++		freeimage(colbutton);
++		button = modbutton = colbutton = nil;
++	}
++	iconinit();
++	repaint_all();
++	/* TEXT/HTEXT are display->black in the classic colors: a
++	 * shared display image that must never be freed. Only free
++	 * images a theme (or iconinit) allocated, each one once. */
++	freelevels(oldtag, oldcoltag, oldrowtag, oldtext);
++	curtheme = idx;
++	return 0;
++}
++
++void
++theme_cycle(void)
++{
++	if(curtheme < 0)
++		theme_apply(themes[0].name);
++	else
++		theme_apply(themes[(curtheme+1)%nthemes].name);
++}
++
+ /*
+  * /dev/snarf updates when the file is closed, so we must open our own
+  * fd here rather than use snarffd
+diff --git a/src/cmd/acme/cols.c b/src/cmd/acme/cols.c
+index a53280c..d15eae0 100644
+--- a/src/cmd/acme/cols.c
++++ b/src/cmd/acme/cols.c
+@@ -38,7 +38,7 @@ colinit(Column *c, Rectangle r)
+ 	t->col = c;
+ 	r1 = r;
+ 	r1.max.y = r1.min.y + font->height;
+-	textinit(t, fileaddtext(nil, t), r1, &reffont, tagcols);
++	textinit(t, fileaddtext(nil, t), r1, &reffont, coltagcols);
+ 	t->what = Columntag;
+ 	r1.min.y = r1.max.y;
+ 	r1.max.y += Border;
+diff --git a/src/cmd/acme/dat.h b/src/cmd/acme/dat.h
+index 8f11d6a..ad74c49 100644
+--- a/src/cmd/acme/dat.h
++++ b/src/cmd/acme/dat.h
+@@ -549,6 +549,8 @@ extern char			*acmeshell;
+ extern char			*fontnames[2];
+ extern Image		*tagcols[NCOL];
+ extern Image		*textcols[NCOL];
++extern Image		*rowtagcols[NCOL];
++extern Image		*coltagcols[NCOL];
+ extern char		wdir[]; /* must use extern because no dimension given */
+ extern int			editing;
+ extern int			erroutfd;
+diff --git a/src/cmd/acme/exec.c b/src/cmd/acme/exec.c
+index 247b1ea..bf0df39 100644
+--- a/src/cmd/acme/exec.c
++++ b/src/cmd/acme/exec.c
+@@ -33,6 +33,9 @@ Buffer	snarfbuf;
+  */
+ 
+ void doabort(Text*, Text*, Text*, int, int, Rune*, int);
++void	bigger(Text*, Text*, Text*, int, int, Rune*, int);
++void	smaller(Text*, Text*, Text*, int, int, Rune*, int);
++void	theme(Text*, Text*, Text*, int, int, Rune*, int);
+ void	del(Text*, Text*, Text*, int, int, Rune*, int);
+ void	delcol(Text*, Text*, Text*, int, int, Rune*, int);
+ void	dotfiles(Text*, Text*, Text*, int, int, Rune*, int);
+@@ -67,6 +70,9 @@ struct Exectab
+ };
+ 
+ static Rune LAbort[] = { 'A', 'b', 'o', 'r', 't', 0 };
++static Rune LBigger[] = { 'B', 'i', 'g', 'g', 'e', 'r', 0 };
++static Rune LSmaller[] = { 'S', 'm', 'a', 'l', 'l', 'e', 'r', 0 };
++static Rune LTheme[] = { 'T', 'h', 'e', 'm', 'e', 0 };
+ static Rune LCut[] = { 'C', 'u', 't', 0 };
+ static Rune LDel[] = { 'D', 'e', 'l', 0 };
+ static Rune LDelcol[] = { 'D', 'e', 'l', 'c', 'o', 'l', 0 };
+@@ -98,6 +104,7 @@ static Rune LZerox[] = { 'Z', 'e', 'r', 'o', 'x', 0 };
+ 
+ Exectab exectab[] = {
+ 	{ LAbort,		doabort,	FALSE,	XXX,		XXX,		},
++	{ LBigger,	bigger,	FALSE,	XXX,		XXX,		},
+ 	{ LCut,		cut,		TRUE,	TRUE,	TRUE	},
+ 	{ LDel,		del,		FALSE,	FALSE,	XXX		},
+ 	{ LDelcol,		delcol,	FALSE,	XXX,		XXX		},
+@@ -121,9 +128,11 @@ Exectab exectab[] = {
+ 	{ LPutall,		putall,	FALSE,	XXX,		XXX		},
+ 	{ LRedo,		undo,	FALSE,	FALSE,	XXX		},
+ 	{ LSend,		sendx,	TRUE,	XXX,		XXX		},
++	{ LSmaller,	smaller,	FALSE,	XXX,		XXX		},
+ 	{ LSnarf,		cut,		FALSE,	TRUE,	FALSE	},
+ 	{ LSort,		sort,		FALSE,	XXX,		XXX		},
+ 	{ LTab,		tab,		FALSE,	XXX,		XXX		},
++	{ LTheme,	theme,		FALSE,	XXX,		XXX		},
+ 	{ LUndo,		undo,	FALSE,	TRUE,	XXX		},
+ 	{ LZerox,		zeroxx,	FALSE,	XXX,		XXX		},
+ 	{ nil, 			0,		0,		0,		0		}
+@@ -1347,6 +1356,268 @@ fontx(Text *et, Text *t, Text *argt, int _0, int _1, Rune *arg, int narg)
+ 	free(flag);
+ }
+ 
++/* First word of a Rune string, as a fresh byte string, or nil. */
++static char*
++firstword(Rune *r, int n)
++{
++	int nr;
++
++	r = skipbl(r, n, &n);
++	if(n == 0)
++		return nil;
++	findbl(r, n, &nr);
++	n -= nr;
++	if(n == 0)
++		return nil;
++	return runetobyte(r, n);
++}
++
++/* The command's argument word: first word of the remainder after
++ * the command, else first word of the 2-1 click argument. */
++static char*
++cmdarg(Rune *arg, int narg, Text *argt)
++{
++	char *a;
++	Rune *r;
++	int n;
++
++	a = firstword(arg, narg);
++	if(a)
++		return a;
++	getarg(argt, FALSE, TRUE, &r, &n);
++	if(r == nil)
++		return nil;
++	a = firstword(r, n);
++	free(r);
++	return a;
++}
++
++void
++theme(Text *_0, Text *_1, Text *argt, int _2, int _3, Rune *arg, int narg)
++{
++	char *a;
++
++	a = cmdarg(arg, narg, argt);
++	if(a == nil)
++		theme_cycle();
++	else{
++		if(theme_apply(a) != 0)
++			warning(nil, "theme: unknown theme %s\n", a);
++		free(a);
++	}
++}
++
++/* Parse a font name of the form [scale*]prefix.size.font into
++ * its scale, prefix (including the trailing dot), and size.
++ * Returns 0 or -1 when the name carries no size to step.
++ * Plan 9 fonts are fixed-size files, so "one step" is the next
++ * size number with a file behind it; the scale prefix is the
++ * plan9port HiDPI mechanism (N*name) and is preserved.
++ */
++static int
++parsefontsize(char *name, int *scale, char **prefix, int *size)
++{
++	char *p, *dot, *q;
++	int s, z, len;
++
++	*scale = 1;
++	p = name;
++	if('0' <= *p && *p <= '9'){
++		s = 0;
++		while('0' <= *p && *p <= '9'){
++			s = s*10 + (*p-'0');
++			p++;
++		}
++		if(*p == '*' && s > 0){
++			*scale = s;
++			p++;
++		} else
++			p = name;	/* not a scale prefix after all */
++	}
++	len = strlen(p);
++	if(len < 8 || strcmp(p+len-5, ".font") != 0)
++		return -1;
++	/* last dot before ".font" bounds the size */
++	dot = p+len-6;
++	while(dot > p && *dot != '.')
++		dot--;
++	if(*dot != '.')
++		return -1;
++	for(q=dot+1; q < p+len-5; q++)
++		if(*q < '0' || *q > '9')
++			return -1;
++	z = atoi(dot+1);
++	if(z <= 0)
++		return -1;
++	*prefix = emalloc(dot+1-p+1);
++	memmove(*prefix, p, dot+1-p);
++	(*prefix)[dot+1-p] = 0;
++	*size = z;
++	return 0;
++}
++
++/* Open the font at (scale, size) for prefix, via rfget, or nil
++ * when no such font file exists. Probing uses openfont directly
++ * so misses stay silent; rfget would warn on each one.
++ */
++static Reffont*
++tryfont(char *prefix, int scale, int size)
++{
++	char *name, *full;
++	Font *f;
++	Reffont *r;
++
++	name = smprint("%s%d.font", prefix, size);
++	if(scale > 1){
++		full = smprint("%d*%s", scale, name);
++		free(name);
++		name = full;
++	}
++	f = openfont(display, name);
++	if(f == nil){
++		free(name);
++		return nil;
++	}
++	freefont(f);
++	r = rfget(FALSE, FALSE, FALSE, name);
++	free(name);
++	return r;
++}
++
++/* Step the font at cur one rung in dir (>0 bigger, <0 smaller)
++ * along the effective-height ladder: file sizes at the same
++ * scale first, then one scale level when sizes run out.
++ * Returns the new font, or nil with *err 1 (name carries no
++ * size to step) or 2 (ladder end).
++ */
++static Reffont*
++stepfont(Font *cur, int dir, int *err)
++{
++	int scale, size, z;
++	char *prefix;
++	Reffont *r;
++
++	if(parsefontsize(cur->name, &scale, &prefix, &size) != 0){
++		*err = 1;
++		return nil;
++	}
++	if(dir > 0){
++		for(z=size+1; z<=size+64; z++)
++			if((r = tryfont(prefix, scale, z)) != nil){
++				free(prefix);
++				*err = 0;
++				return r;
++			}
++		for(z=1; z<=64; z++){
++			if(z*(scale+1) <= size*scale)
++				continue;
++			if((r = tryfont(prefix, scale+1, z)) != nil){
++				free(prefix);
++				*err = 0;
++				return r;
++			}
++		}
++	}else{
++		for(z=size-1; z>=1; z--)
++			if((r = tryfont(prefix, scale, z)) != nil){
++				free(prefix);
++				*err = 0;
++				return r;
++			}
++		if(scale > 1)
++			for(z=64; z>=1; z--){
++				if(z*(scale-1) >= size*scale)
++					continue;
++				if((r = tryfont(prefix, scale-1, z)) != nil){
++					free(prefix);
++					*err = 0;
++					return r;
++				}
++			}
++	}
++	free(prefix);
++	*err = 2;
++	return nil;
++}
++
++/* Set a window's body font, the way Font does. */
++static void
++applybodyfont(Window *w, Reffont *newfont)
++{
++	Text *t;
++	Dirlist *dp;
++	char *aa;
++	int i;
++
++	t = &w->body;
++	draw(screen, t->w->r, textcols[BACK], nil, ZP);
++	rfclose(t->reffont);
++	t->reffont = newfont;
++	t->fr.font = newfont->f;
++	frinittick(&t->fr);
++	if(t->w->isdir){
++		t->all.min.x++;	/* force recolumnation; disgusting! */
++		for(i=0; i<t->w->ndl; i++){
++			dp = t->w->dlp[i];
++			aa = runetobyte(dp->r, dp->nr);
++			dp->wid = stringwidth(newfont->f, aa);
++			free(aa);
++		}
++	}
++	/* avoid shrinking of window due to quantization */
++	colgrow(t->w->col, t->w, -1);
++}
++
++/* Bigger [n] / Smaller [n]: step the window's body font size
++ * up or down n sizes (default 1), like wily. Only the body
++ * font moves; tags keep the global font, as Font does.
++ */
++static void
++fontstep(Text *et, Text *argt, Rune *arg, int narg, int dir, char *name)
++{
++	Window *w;
++	Reffont *nf;
++	char *a;
++	int steps, i, err;
++
++	if(et==nil || et->w==nil)
++		return;
++	w = et->w;
++	a = cmdarg(arg, narg, argt);
++	steps = 1;
++	if(a){
++		steps = atoi(a);
++		if(steps <= 0)
++			steps = 1;
++		if(steps > 16)
++			steps = 16;
++		free(a);
++	}
++	for(i=0; i<steps; i++){
++		nf = stepfont(w->body.fr.font, dir, &err);
++		if(nf == nil){
++			if(err == 1)
++				warning(nil, "%s: this font cannot be resized\n", name);
++			else
++				warning(nil, "%s: no larger/smaller font available\n", name);
++			return;
++		}
++		applybodyfont(w, nf);
++	}
++}
++
++void
++bigger(Text *et, Text *_0, Text *argt, int _1, int _2, Rune *arg, int narg)
++{
++	fontstep(et, argt, arg, narg, 1, "Bigger");
++}
++
++void
++smaller(Text *et, Text *_0, Text *argt, int _1, int _2, Rune *arg, int narg)
++{
++	fontstep(et, argt, arg, narg, -1, "Smaller");
++}
++
+ void
+ incl(Text *et, Text *_0, Text *argt, int _1, int _2, Rune *arg, int narg)
+ {
+diff --git a/src/cmd/acme/fns.h b/src/cmd/acme/fns.h
+index cf9a7f1..0820dbd 100644
+--- a/src/cmd/acme/fns.h
++++ b/src/cmd/acme/fns.h
+@@ -49,6 +49,10 @@ void	killtasks(void);
+ int	runeeq(Rune*, uint, Rune*, uint);
+ int	ALEF_tid(void);
+ void	iconinit(void);
++int	theme_apply(char*);
++void	theme_cycle(void);
++char*	themename(void);
++void	windrawbutton(Window*);
+ Timer*	timerstart(int);
+ void	timerstop(Timer*);
+ void	timercancel(Timer*);
+diff --git a/src/cmd/acme/rows.c b/src/cmd/acme/rows.c
+index b654b73..5c8d68e 100644
+--- a/src/cmd/acme/rows.c
++++ b/src/cmd/acme/rows.c
+@@ -35,7 +35,7 @@ rowinit(Row *row, Rectangle r)
+ 	r1 = r;
+ 	r1.max.y = r1.min.y + font->height;
+ 	t = &row->tag;
+-	textinit(t, fileaddtext(nil, t), r1, rfget(FALSE, FALSE, FALSE, nil), tagcols);
++	textinit(t, fileaddtext(nil, t), r1, rfget(FALSE, FALSE, FALSE, nil), rowtagcols);
+ 	t->what = Rowtag;
+ 	t->row = row;
+ 	t->w = nil;
+@@ -357,6 +357,11 @@ rowdump1(Row *row, Biobuf *b)
+ 			n++;
+ 		Bprint(b, "c%11d %.*S\n", i, n, r);
+ 	}
++	/* Theme, if one was chosen: after the tags, so an older
++	 * acme skips it harmlessly (its tag loop stops at the
++	 * first unknown line, having already read the tags). */
++	if(themename() != nil)
++		Bprint(b, "T %s\n", themename());
+ 	for(i=0; i<row->ncol; i++){
+ 		c = row->col[i];
+ 		for(j=0; j<c->nw; j++){
+@@ -555,10 +560,12 @@ rowloadfonts(char *file)
+ 	Bterm(b);
+ }
+ 
++/* Theme named by a T line in the dump being loaded, if any. */
++static char *loadtheme;
++
+ int
+ rowload(Row *row, char *file, int initing)
+-{
+-	int i, j, line, y, nr, nfontr, n, ns, ndumped, dumpid, x, fd, done;
++{	int i, j, line, y, nr, nfontr, n, ns, ndumped, dumpid, x, fd, done;
+ 	double percent;
+ 	Biobuf *b, *bout;
+ 	char *buf, *l, *t, *fontname;
+@@ -578,6 +585,8 @@ rowload(Row *row, char *file, int initing)
+ 		sprint(buf, "%s/acme.dump", home);
+ 		file = buf;
+ 	}
++	free(loadtheme);
++	loadtheme = nil;
+ 	b = Bopen(file, OREAD);
+ 	if(b == nil){
+ 		warning(nil, "can't open load file %s: %r\n", file);
+@@ -673,6 +682,13 @@ rowload(Row *row, char *file, int initing)
+ 			textinsert(&row->tag, 0, r, nr, TRUE);
+ 			free(r);
+ 			break;
++		case 'T':
++			l[Blinelen(b)-1] = 0;
++			if(l[2] != 0){
++				free(loadtheme);
++				loadtheme = estrdup(l+2);
++			}
++			break;
+ 		default:
+ 			done = 1;
+ 			break;
+@@ -831,6 +847,12 @@ rowload(Row *row, char *file, int initing)
+ Nextline:
+ 		l = rdline(b, &line);
+ 	}
++	if(loadtheme){
++		if(theme_apply(loadtheme) != 0)
++			warning(nil, "unknown theme %s in dump\n", loadtheme);
++		free(loadtheme);
++		loadtheme = nil;
++	}
+ 	Bterm(b);
+ 	fbuffree(buf);
+ 	return TRUE;
+diff --git a/src/cmd/acme/text.c b/src/cmd/acme/text.c
+index 09422dd..9f21e42 100644
+--- a/src/cmd/acme/text.c
++++ b/src/cmd/acme/text.c
+@@ -15,6 +15,8 @@
+ 
+ Image	*tagcols[NCOL];
+ Image	*textcols[NCOL];
++Image	*rowtagcols[NCOL];
++Image	*coltagcols[NCOL];
+ static Rune Ldot[] = { '.', 0 };
+ 
+ enum{

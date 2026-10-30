@@ -14,6 +14,12 @@ WORKDIR /app
 RUN git clone https://github.com/9fans/plan9port.git
 WORKDIR /app/plan9port
 
+# Apply the acme Theme/Bigger/Smaller patch (vendored in this repo).
+# If upstream plan9port drifts, this fails the build rather than
+# silently shipping stock acme.
+COPY acme-theme-bigger.patch /tmp/acme-theme-bigger.patch
+RUN git apply /tmp/acme-theme-bigger.patch
+
 # Run full installation script (builds binaries and finalizes paths)
 RUN ./INSTALL
 
