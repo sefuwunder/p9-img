@@ -14,6 +14,8 @@ on the host X server.
   (defaults to `rc`).
 - `run-plan9.sh` — builds the image if missing, grants local X11
   access, and runs the container with the workspace mounted.
+- `acme-container` — desk integration: runs containerized acme
+  against host-mounted 9P trees (see below).
 - `.dockerignore` — keeps `.git` out of the build context.
 
 ## Quick start
@@ -28,6 +30,28 @@ chmod +x run-plan9.sh
 
 The host directory `~/dashboard` is mounted at `/workspace`
 inside the container (the image's working directory).
+
+## Desk integration (acme-container)
+
+`acme-container` runs containerized acme against 9P trees that are
+already mounted on the host (the `desk acme` flow in p9int): it
+binds each mounted tree leaf individually (`$MOUNT_ROOT/cadence`,
+`$MOUNT_ROOT/comms/relay`, `$MOUNT_ROOT/comms/outpost`), so the
+trees are visible inside the container, and passes its arguments
+through to acme.
+
+```sh
+chmod +x acme-container
+ACME_BIN=/path/to/acme-container desk acme
+```
+
+The desk script still starts the services and mounts the trees on
+the host; only acme runs in the container. Closing acme ends the
+container run and the desk trap unmounts as usual. `MOUNT_ROOT`
+(default `/n`) is respected for the bind paths. Note the container
+builds stock 9fans plan9port, so this acme does not carry the
+Theme/Bigger/Smaller patch; run podman rootless so the container
+can read the user-owned FUSE mounts.
 
 ## Notes
 

@@ -1,0 +1,31 @@
+#!/bin/sh
+# acme-container — run acme from the p9-img container against 9P
+# trees already mounted on the host (the `desk acme` flow).
+# Usage: ACME_BIN=/path/to/acme-container desk acme
+# The desk script mounts the trees first and passes the file to open
+# as arguments; this wrapper passes them through to container acme.
+# Each tree leaf is bound individually: binding the parent directory
+# alone would not carry the FUSE submounts into the container.
+
+MOUNT_ROOT=${MOUNT_ROOT:-/n}
+
+cleanup() {
+    xhost -local:root 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+xhost +local:root 2>/dev/null || true
+podman run --rm -it \
+    --name plan9-workspace \
+    --net=host \
+    --env DISPLAY="${DISPLAY:-:0}" \
+    --volume /tmp/.X11-unix:/tmp/.X11-unix:ro \
+    --volume "$HOME/dashboard:/workspace:z" \
+    --volume "$MOUNT_ROOT/cadence:$MOUNT_ROOT/cadence" \
+    --volume "$MOUNT_ROOT/comms/relay:$MOUNT_ROOT/comms/relay" \
+    --volume "$MOUNT_ROOT/comms/outpost:$MOUNT_ROOT/comms/outpost" \
+    plan9port-env acme "$@"
+rc=$?
+exit $rc
