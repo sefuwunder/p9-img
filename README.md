@@ -19,6 +19,8 @@ on the host X server.
 - `acme-theme-bigger.patch` — the acme Theme/Bigger/Smaller
   patch, applied during the image build so container acme has
   the same theme and font-step commands as the patched host build.
+- `.github/workflows/ci.yml` — CI: builds the image and
+  smoke-tests it (see below).
 - `.dockerignore` — keeps `.git` out of the build context.
 
 ## Quick start
@@ -56,6 +58,17 @@ build applies the acme Theme/Bigger/Smaller patch, so container
 acme has the same `Theme`/`Bigger`/`Smaller` commands as the
 patched host build; run podman rootless so the container
 can read the user-owned FUSE mounts.
+
+## CI
+
+`.github/workflows/ci.yml` builds the image and smoke-tests it on
+every push to `main` and every pull request, plus a weekly run on
+Mondays (09:00 UTC) to catch upstream drift even when p9-img
+itself has not changed. CI builds with docker (the local flow
+uses podman; the Containerfile builds the same under both) and
+pushes no image anywhere. If the build fails, the first suspects
+are the vendored patch no longer applying to current plan9port
+master or a break in `./INSTALL`.
 
 ## Notes
 
