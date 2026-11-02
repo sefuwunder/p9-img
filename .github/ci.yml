@@ -1,0 +1,58 @@
+# CI for p9-img: build the container image and smoke-test it.
+#
+# Build success is also the patch check: the Containerfile applies
+# acme-theme-bigger.patch during the build, so if upstream
+# plan9port drifts and the patch no longer applies, this fails
+# instead of silently shipping stock acme.
+#
+# CI uses docker (guaranteed on the runner); the local flow uses
+# podman. The Containerfile builds the same under both.
+#
+# On pushes to main ONLY, the built image is also pushed to GHCR as
+# ghcr.io/sefuwunder/p9-img:latest plus a sha tag, so run-plan9.sh can
+# pull it instead of building locally. Pull requests and the Monday
+# drift-check runs build and smoke-test but never push.
+#
+# NOTE: this file cannot be pushed by the automation token (it lacks the
+# workflow scope). Push workflow changes with your own credentials.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Mondays 09:00 UTC: catch upstream drift even when p9-img itself
+    # has not changed.
+    - cron: "0 9 * * 1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f Containerfile -t ghcr.io/sefuwunder/p9-img:latest -t ghcr.io/sefuwunder/p9-img:sha-${GITHUB_SHA::7} .
+
+      - name: Smoke test
+        run: docker run --rm ghcr.io/sefuwunder/p9-img:latest rc -c 'ls /usr/local/plan9/bin/acme'
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        if: github.event_name == 'push'
+        run: |
+          docker push ghcr.io/sefuwunder/p9-img:latest
+          docker push ghcr.io/sefuwunder/p9-img:sha-${GITHUB_SHA::7}
